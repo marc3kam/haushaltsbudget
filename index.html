@@ -155,6 +155,26 @@ function fmtC(n,s=false){const v=Math.abs(+n||0).toFixed(2);return s?((+n>=0?'+'
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,5);}
 
 // ── Reserve helpers ───────────────────────────────────────────────────────────
+// Get all due months for a reserve category in a given year
+function getDueDates(cat, year) {
+  if (!cat.res || !cat.rdueMonth) return [];
+  const interval = cat.rinterval || 12;
+  const dues = [];
+  // Start from rdueMonth, go backwards/forwards to cover whole year
+  // First due is rdueMonth itself
+  let m = cat.rdueMonth; // 1-12
+  // Find all months in the year that are due
+  // due months = rdueMonth, rdueMonth - interval, rdueMonth - 2*interval, etc.
+  // and rdueMonth + interval, etc. (only those in 1-12)
+  for (let base = m; base >= 1; base -= interval) {
+    if (base >= 1 && base <= 12) dues.push(base);
+  }
+  for (let base = m + interval; base <= 12; base += interval) {
+    dues.push(base);
+  }
+  return [...new Set(dues)].sort((a,b)=>a-b).map(mo => `${year}-${String(mo).padStart(2,'0')}`);
+}
+
 function calcReserve(cat, data, currentMonth, view, userId) {
   const monthlySave = view === 'shared' ? (cat.rsb||0) : (cat.rpb||0);
   if (!monthlySave || !cat.res) return null;
@@ -162,9 +182,8 @@ function calcReserve(cat, data, currentMonth, view, userId) {
   // Count months back (max 24)
   const startDate = new Date(currentMonth + '-01');
   startDate.setMonth(startDate.getMonth() - 23);
-  const start = startDate;
   const cur = new Date(currentMonth + '-01');
-  const months = (cur.getFullYear()-start.getFullYear())*12+(cur.getMonth()-start.getMonth())+1;
+  const months = (cur.getFullYear()-startDate.getFullYear())*12+(cur.getMonth()-startDate.getMonth())+1;
   const accumulated = monthlySave * months;
 
   // Total spent all time up to current month
@@ -176,21 +195,22 @@ function calcReserve(cat, data, currentMonth, view, userId) {
 
   const available = Math.max(0, accumulated - totalSpent);
 
-  // Next due date calculation
+  // Next due date: find next due month >= currentMonth
   let nextDue = null, daysUntil = null, amountDue = null, shortage = null;
   if (cat.rdueMonth) {
-    // rdueMonth = 1-12, rinterval = how many months between payments
-    const interval = cat.rinterval || 1;
+    const interval = cat.rinterval || 12;
     const dueAmount = monthlySave * interval;
-    const now = new Date(currentMonth + '-01');
-    // Find next occurrence of due month
-    let next = new Date(now.getFullYear(), cat.rdueMonth - 1, 1);
-    if (next <= now) next.setFullYear(next.getFullYear() + 1);
-    // Check if within interval
-    const monthsUntil = (next.getFullYear()-now.getFullYear())*12+(next.getMonth()-now.getMonth());
-    if (monthsUntil <= interval) {
-      nextDue = fmtM(next);
-      daysUntil = Math.round((next - new Date()) / 864e5);
+    const curDate = new Date(currentMonth + '-01');
+    const curYear = curDate.getFullYear();
+    // Get due months this year and next year
+    const thisYear = getDueDates(cat, curYear);
+    const nextYear = getDueDates(cat, curYear + 1);
+    const allDues = [...thisYear, ...nextYear];
+    const future = allDues.filter(d => d >= currentMonth);
+    if (future.length > 0) {
+      nextDue = future[0];
+      const nextDate = new Date(nextDue + '-01');
+      daysUntil = Math.round((nextDate - new Date()) / 864e5);
       amountDue = dueAmount;
       shortage = Math.max(0, amountDue - available);
     }
@@ -671,10 +691,11 @@ function Dash({data,spend,tbud,tspent,minc,saldo,sess}){
         h('div',{style:{textAlign:'right'}},h('div',{className:'lbl'},'BUDGET'),h('div',{style:{fontSize:22,fontWeight:800,color:'var(--text)'}},fmtC(tbud)))
       ),
       h(Bar,{pct,col:tc}),
-      h('div',{style:{textAlign:'center',marginTop:6,fontSize:12,fontWeight:700,color:tc}},pct>=1?'⚠️ Budget überschritten!':fmtC(tbud-tspent)+' verfügbar ('+(pct*100).toFixed(0)+'%)')
+      h('div',{style:{textAlign:'center',marginTop:6,fontSize:12,fontWeight:700,color:tc}},pct>=1?'⚠️ Budget überschritten! '+fmtC(tspent-tbud)+' überzogen':fmtC(tbud-tspent)+' verfügbar ('+(pct*100).toFixed(0)+'%)')
     ),
     h('div',{style:{display:'flex',flexDirection:'column',gap:8}},
       data.cats.map(cat=>{
+        if(cat.res)return null; // Reserve cats shown in Sparkonto only
         const bud=data.view==='shared'?cat.sb:cat.pb,sp=spend[cat.id]||0;
         if(!bud&&!sp)return null;
         const p=bud>0?Math.min(sp/bud,1):0,col=p>.9?'var(--danger)':p>.7?'var(--warn)':cat.c;
@@ -684,7 +705,7 @@ function Dash({data,spend,tbud,tspent,minc,saldo,sess}){
               h('div',{className:'cat-icon',style:{background:cat.c+'22'}},cat.i),
               h('div',null,h('div',{style:{fontWeight:600,fontSize:14,color:'var(--text)'}},cat.n),bud>0&&h('div',{style:{fontSize:11,color:'var(--muted)'}},fmtC(bud)))
             ),
-            h('div',{style:{textAlign:'right'}},h('div',{style:{fontWeight:700,color:col,fontSize:14}},fmtC(sp)),bud>0&&h('div',{style:{fontSize:11,color:col}},fmtC(bud-sp)+' übrig'))
+            h('div',{style:{textAlign:'right'}},h('div',{style:{fontWeight:700,color:col,fontSize:14}},fmtC(sp)),bud>0&&h('div',{style:{fontSize:11,color:col}},(bud-sp>=0?fmtC(bud-sp)+' übrig':fmtC(sp-bud)+' überzogen')))
           ),
           bud>0&&h(Bar,{pct:p,col,h5:true}),
           cat.res&&h(ReserveBadge,{cat,data,month:data.month,view:data.view,userId:sess&&sess.id})
@@ -810,47 +831,98 @@ function Hist({data,set,sess,onPhoto}){
 // ── Year view ─────────────────────────────────────────────────────────────────
 function Year({data,sess}){
   const [yr,syr]=useState(new Date().getFullYear());
+
+  // Per month: budgeted expenses, budgeted income (from recurring), actual expenses, actual income, due payments
   const yd=useMemo(()=>Array.from({length:12},(_,i)=>{
     const mo=yr+'-'+String(i+1).padStart(2,'0');
-    const fl=(inc)=>data.view==='shared'?data.expenses.filter(e=>e.month===mo&&e.shared&&(e.type==='income')==inc):data.expenses.filter(e=>e.month===mo&&!e.shared&&e.uid===sess.id&&(e.type==='income')==inc);
-    const exp=fl(false).reduce((s,e)=>s+e.amt,0),inc=fl(true).reduce((s,e)=>s+e.amt,0);
-    return{label:MDS[i],mo,exp,inc,saldo:inc-exp};
-  }),[data.expenses,yr,data.view,sess.id]);
-  const te=yd.reduce((s,d)=>s+d.exp,0),ti=yd.reduce((s,d)=>s+d.inc,0),ts=ti-te;
-  const max=Math.max(...yd.map(d=>Math.max(d.exp,d.inc)),1);
+
+    // Actual expenses/income
+    const fltrExp=(inc)=>data.view==='shared'
+      ?data.expenses.filter(e=>e.month===mo&&e.shared&&(e.type==='income')==inc&&!data.cats.find(c=>c.id===e.catId)?.res)
+      :data.expenses.filter(e=>e.month===mo&&!e.shared&&e.uid===sess.id&&(e.type==='income')==inc&&!data.cats.find(c=>c.id===e.catId)?.res);
+    const actExp=fltrExp(false).reduce((s,e)=>s+e.amt,0);
+    const actInc=fltrExp(true).reduce((s,e)=>s+e.amt,0);
+
+    // Budgeted expenses (from non-reserve cats)
+    const budExp=data.cats.filter(c=>!c.res).reduce((s,c)=>s+(data.view==='shared'?c.sb:c.pb),0);
+
+    // Budgeted income (from income recurring)
+    const budInc=(data.recurring||[]).filter(r=>r.type==='income'&&r.active).reduce((s,r)=>{
+      const occ=getOccurrences(r,mo+'-01',mo+'-28');
+      return s+occ.length*r.amt;
+    },0);
+
+    // Due reserve payments this month
+    const dues=data.cats.filter(c=>c.res&&c.rdueMonth).map(cat=>{
+      const allDues=getDueDates(cat,yr);
+      if(!allDues.includes(mo))return null;
+      const monthlySave=data.view==='shared'?(cat.rsb||0):(cat.rpb||0);
+      const interval=cat.rinterval||12;
+      return{cat,amount:monthlySave*interval};
+    }).filter(Boolean);
+
+    return{label:MDS[i],mo,actExp,actInc,budExp,budInc,saldo:actInc-actExp,dues};
+  }),[data.expenses,data.cats,data.recurring,yr,data.view,sess.id]);
+
+  const te=yd.reduce((s,d)=>s+d.actExp,0);
+  const ti=yd.reduce((s,d)=>s+d.actInc,0);
+  const ts=ti-te;
+  const maxBar=Math.max(...yd.map(d=>Math.max(d.actExp,d.actInc,d.budExp,d.budInc)),1);
+
   const cs=useMemo(()=>{
-    const m={};data.expenses.filter(e=>e.month.startsWith(String(yr))&&e.type!=='income'&&(data.view==='shared'?e.shared:e.uid===sess.id)).forEach(e=>{m[e.catId]=(m[e.catId]||0)+e.amt;});
+    const m={};
+    data.expenses.filter(e=>
+      e.month.startsWith(String(yr))&&e.type!=='income'&&
+      !data.cats.find(c=>c.id===e.catId)?.res&&
+      (data.view==='shared'?e.shared:e.uid===sess.id)
+    ).forEach(e=>{m[e.catId]=(m[e.catId]||0)+e.amt;});
     return Object.entries(m).map(([id,v])=>{const c=data.cats.find(x=>x.id===id);return{id,v,n:c?.n||'?',c:c?.c||'#64748b',i:c?.i||'📦'};}).sort((a,b)=>b.v-a.v);
   },[data.expenses,data.cats,yr,data.view,sess.id]);
 
   return h(Fragment,null,
+    // Year selector
     h('div',{className:'row',style:{justifyContent:'space-between',marginBottom:14}},
       h('button',{onClick:()=>syr(y=>y-1),className:'btn btn-raised',style:{padding:'6px 14px',fontSize:14}},'‹'),
       h('div',{style:{fontWeight:800,fontSize:18,color:'var(--text)'}},yr),
       h('button',{onClick:()=>syr(y=>y+1),className:'btn btn-raised',style:{padding:'6px 14px',fontSize:14}},'›')
     ),
-    h('div',{className:'grid3'},
+    // Totals
+    h('div',{className:'grid3',style:{marginBottom:14}},
       ...[['Einnahmen',ti,'var(--income)'],['Ausgaben',te,'var(--danger)'],['Saldo',Math.abs(ts),ts>=0?'var(--income)':'var(--danger)']].map(([l,v,c])=>
         h('div',{key:l,className:'stat-card'},h('div',{className:'stat-lb'},l),h('div',{className:'stat-val',style:{color:c}},fmtC(v)))
       )
     ),
-    // Simple bar chart using divs
+    // Bar chart with budget vs actual
     h('div',{className:'card',style:{marginBottom:14}},
       h('div',{className:'lbl',style:{marginBottom:8}},'MONAT FÜR MONAT'),
-      h('div',{className:'row',style:{gap:12,marginBottom:8}},
-        h('div',{className:'row',style:{gap:4}},h('div',{style:{width:10,height:10,background:'var(--income)',borderRadius:2}}),h('span',{style:{fontSize:10,color:'var(--muted)'}},'Einnahmen')),
-        h('div',{className:'row',style:{gap:4}},h('div',{style:{width:10,height:10,background:'var(--danger)',borderRadius:2}}),h('span',{style:{fontSize:10,color:'var(--muted)'}},'Ausgaben'))
+      h('div',{className:'row',style:{gap:10,marginBottom:8,flexWrap:'wrap'}},
+        h('div',{className:'row',style:{gap:4}},h('div',{style:{width:10,height:10,background:'var(--income)',borderRadius:2,opacity:.4}}),h('span',{style:{fontSize:10,color:'var(--muted)'}},'Budget Einnahmen')),
+        h('div',{className:'row',style:{gap:4}},h('div',{style:{width:10,height:10,background:'var(--income)',borderRadius:2}}),h('span',{style:{fontSize:10,color:'var(--muted)'}},'Eff. Einnahmen')),
+        h('div',{className:'row',style:{gap:4}},h('div',{style:{width:10,height:10,background:'var(--danger)',borderRadius:2,opacity:.4}}),h('span',{style:{fontSize:10,color:'var(--muted)'}},'Budget Ausgaben')),
+        h('div',{className:'row',style:{gap:4}},h('div',{style:{width:10,height:10,background:'var(--danger)',borderRadius:2}}),h('span',{style:{fontSize:10,color:'var(--muted)'}},'Eff. Ausgaben'))
       ),
-      h('div',{style:{display:'flex',alignItems:'flex-end',gap:3,height:100}},
-        yd.map(d=>h('div',{key:d.mo,style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:1}},
-          h('div',{style:{width:'100%',display:'flex',gap:1,alignItems:'flex-end',height:80}},
-            h('div',{style:{flex:1,background:'var(--income)',borderRadius:'2px 2px 0 0',height:Math.max((d.inc/max)*80,d.inc>0?2:0)+'px',opacity:.8}}),
-            h('div',{style:{flex:1,background:'var(--danger)',borderRadius:'2px 2px 0 0',height:Math.max((d.exp/max)*80,d.exp>0?2:0)+'px',opacity:.8}})
-          ),
-          h('div',{style:{fontSize:8,color:'var(--muted)',marginTop:2}},d.label)
-        ))
+      h('div',{style:{display:'flex',alignItems:'flex-end',gap:2,height:110,position:'relative'}},
+        yd.map((d,i)=>{
+          const hasDue=d.dues.length>0;
+          return h('div',{key:d.mo,style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',gap:1}},
+            h('div',{style:{width:'100%',display:'flex',gap:1,alignItems:'flex-end',height:88,position:'relative'}},
+              // Budget income (light)
+              h('div',{style:{flex:1,background:'var(--income)',borderRadius:'2px 2px 0 0',height:Math.max((d.budInc/maxBar)*88,d.budInc>0?2:0)+'px',opacity:.3}}),
+              // Actual income
+              h('div',{style:{flex:1,background:'var(--income)',borderRadius:'2px 2px 0 0',height:Math.max((d.actInc/maxBar)*88,d.actInc>0?2:0)+'px',opacity:.9}}),
+              // Budget expense (light)
+              h('div',{style:{flex:1,background:'var(--danger)',borderRadius:'2px 2px 0 0',height:Math.max((d.budExp/maxBar)*88,d.budExp>0?2:0)+'px',opacity:.3}}),
+              // Actual expense
+              h('div',{style:{flex:1,background:'var(--danger)',borderRadius:'2px 2px 0 0',height:Math.max((d.actExp/maxBar)*88,d.actExp>0?2:0)+'px',opacity:.9}}),
+              // Due marker
+              hasDue&&h('div',{title:d.dues.map(x=>x.cat.n+': '+fmtC(x.amount)).join(', '),style:{position:'absolute',top:-8,left:'50%',transform:'translateX(-50%)',color:'var(--blue)',fontSize:10,fontWeight:800,cursor:'default'}},'💸')
+            ),
+            h('div',{style:{fontSize:8,color:hasDue?'var(--blue)':'var(--muted)',marginTop:2,fontWeight:hasDue?700:400}},d.label)
+          );
+        })
       )
     ),
+    // Category breakdown
     cs.length>0&&h('div',{className:'card',style:{marginBottom:14}},
       h('div',{className:'lbl',style:{marginBottom:10}},'AUSGABEN NACH KATEGORIE'),
       cs.slice(0,8).map(s=>h('div',{key:s.id,style:{marginBottom:8}},
@@ -861,14 +933,35 @@ function Year({data,sess}){
         h(Bar,{pct:s.v/(cs[0].v||1),col:s.c,h5:true})
       ))
     ),
+    // Month detail table with budget vs actual + due payments
     h('div',{className:'card'},
-      h('div',{className:'lbl',style:{marginBottom:10}},'MONATSDETAIL'),
-      yd.map(d=>h('div',{key:d.mo,className:'year-row'},
-        h('div',{style:{fontSize:13,color:'var(--text)',width:36,fontWeight:600}},d.label),
-        h('div',{style:{fontSize:11,color:'var(--income)',textAlign:'right',flex:1}},'+'+fmtC(d.inc)),
-        h('div',{style:{fontSize:11,color:'var(--danger)',textAlign:'right',flex:1}},'-'+fmtC(d.exp)),
-        h('div',{style:{fontSize:11,fontWeight:700,color:d.saldo>=0?'var(--income)':'var(--danger)',textAlign:'right',flex:1}},fmtC(d.saldo,true))
-      ))
+      h('div',{className:'lbl',style:{marginBottom:8}},'MONATSDETAIL'),
+      // Header
+      h('div',{style:{display:'grid',gridTemplateColumns:'36px 1fr 1fr 1fr 1fr',gap:4,padding:'4px 0',borderBottom:'2px solid var(--border)',marginBottom:4}},
+        h('div',{style:{fontSize:9,color:'var(--muted)'}},''),
+        h('div',{style:{fontSize:9,color:'var(--muted)',textAlign:'right'}},'Bud. Ein.'),
+        h('div',{style:{fontSize:9,color:'var(--muted)',textAlign:'right'}},'Eff. Ein.'),
+        h('div',{style:{fontSize:9,color:'var(--muted)',textAlign:'right'}},'Bud. Aus.'),
+        h('div',{style:{fontSize:9,color:'var(--muted)',textAlign:'right'}},'Eff. Aus.')
+      ),
+      yd.map(d=>{
+        const hasDue=d.dues.length>0;
+        return h(Fragment,{key:d.mo},
+          h('div',{style:{display:'grid',gridTemplateColumns:'36px 1fr 1fr 1fr 1fr',gap:4,padding:'5px 0',borderBottom:'1px solid var(--border)',alignItems:'center'}},
+            h('div',{style:{fontSize:12,color:hasDue?'var(--blue)':'var(--text)',fontWeight:hasDue?700:400}},d.label),
+            h('div',{style:{fontSize:11,color:'var(--income)',textAlign:'right',opacity:.6}},d.budInc>0?'+'+fmtC(d.budInc):'-'),
+            h('div',{style:{fontSize:11,color:'var(--income)',textAlign:'right'}},d.actInc>0?'+'+fmtC(d.actInc):'-'),
+            h('div',{style:{fontSize:11,color:'var(--danger)',textAlign:'right',opacity:.6}},d.budExp>0?'-'+fmtC(d.budExp):'-'),
+            h('div',{style:{fontSize:11,color:'var(--danger)',textAlign:'right'}},d.actExp>0?'-'+fmtC(d.actExp):'-')
+          ),
+          // Due payments row
+          hasDue&&h('div',{style:{padding:'3px 0 5px 36px',borderBottom:'1px solid var(--border)'}},
+            d.dues.map((due,i)=>h('div',{key:i,style:{fontSize:10,color:'var(--blue)'}},
+              '💸 '+due.cat.n+': '+fmtC(due.amount)+' fällig'
+            ))
+          )
+        );
+      })
     )
   );
 }
@@ -1197,25 +1290,40 @@ function Sett({data,set,sess,drv,setD,sync,connect,disconnect,doUp,doDn}){
       h(Lbl,{t:'ICON'}),h('div',{className:'ico-pick',style:{display:'flex',flexWrap:'wrap',gap:5,margin:'4px 0 10px'}},ICONS.map(ic=>h('button',{key:ic,onClick:()=>sf2(p=>({...p,i:ic})),style:{border:'2px solid '+(f2.i===ic?'var(--green)':'var(--border)'),background:f2.i===ic?'var(--green)22':'var(--raised)'}},ic))),
       h(Lbl,{t:'FARBE'}),h('div',{className:'col-pick',style:{display:'flex',gap:6,margin:'4px 0 10px',flexWrap:'wrap'}},COLS.map(c=>h('button',{key:c,onClick:()=>sf2(p=>({...p,c})),style:{background:c,border:'3px solid '+(f2.c===c?'#fff':'transparent')}}))),
       !incM&&h(Fragment,null,
-        h(Lbl,{t:'HAUSHALTS-BUDGET / MONAT'}),h('input',{type:'number',min:'0',step:'10',value:f2.sb,onInput:e=>sf2(p=>({...p,sb:+e.target.value})),className:'inp'}),
-        h(Lbl,{t:'PERSÖNLICHES BUDGET / MONAT'}),h('input',{type:'number',min:'0',step:'10',value:f2.pb,onInput:e=>sf2(p=>({...p,pb:+e.target.value})),className:'inp'}),
-        h('div',{style:{height:1,background:'var(--border)',margin:'4px 0 10px'}}),
-        h('div',{className:'row',style:{gap:10,marginBottom:f2.res?10:2,cursor:'pointer',padding:'8px 10px',background:'var(--raised)',borderRadius:8,border:'1px solid '+(f2.res?'var(--blue)':'var(--border)')},onClick:()=>sf2(p=>({...p,res:!p.res}))},
-          h('input',{type:'checkbox',checked:f2.res||false,readOnly:true,style:{width:17,height:17,accentColor:'var(--blue)'}}),
+        // Reserve toggle
+        h('div',{className:'row',style:{gap:10,marginBottom:12,cursor:'pointer',padding:'10px 12px',background:'var(--raised)',borderRadius:8,border:'1px solid '+(f2.res?'var(--blue)':'var(--border)')},onClick:()=>sf2(p=>({...p,res:!p.res}))},
+          h('input',{type:'checkbox',checked:f2.res||false,readOnly:true,style:{width:18,height:18,accentColor:'var(--blue)'}}),
           h('div',null,
-            h('div',{style:{fontSize:13,fontWeight:600,color:f2.res?'var(--blue)':'var(--text)'}},'🏦 Rückstellung aktivieren'),
-            h('div',{style:{fontSize:10,color:'var(--muted)'}},'Betrag kumuliert sich monatlich bis zur Zahlung')
+            h('div',{style:{fontSize:13,fontWeight:700,color:f2.res?'var(--blue)':'var(--text)'}},'🏦 Sparkonto / Rückstellung'),
+            h('div',{style:{fontSize:11,color:'var(--muted)'}},'Nur im Sparkonto-Tab sichtbar, nicht in Übersicht')
           )
         ),
-        f2.res&&h('div',{style:{background:'var(--raised)',borderRadius:8,padding:12,marginBottom:10,border:'1px solid var(--blue)44'}},
-          h(Lbl,{t:'MONATLICHE RÜCKSTELLUNG HAUSHALT (CHF)'}),
-          h('input',{type:'number',min:'0',step:'10',value:f2.rsb||0,onInput:e=>sf2(p=>({...p,rsb:+e.target.value})),className:'inp'}),
-          h(Lbl,{t:'MONATLICHE RÜCKSTELLUNG PERSÖNLICH (CHF)'}),
-          h('input',{type:'number',min:'0',step:'10',value:f2.rpb||0,onInput:e=>sf2(p=>({...p,rpb:+e.target.value})),className:'inp',style:{marginBottom:0}}),
-          h('div',{style:{fontSize:10,color:'var(--muted)',marginTop:6}},'💡 z.B. Krankenkasse CHF 300 / 3 Monate = CHF 100 / Monat einstellen'),
-          h('div',{style:{height:1,background:'var(--border)',margin:'10px 0'}}),
-          h(Lbl,{t:'FÄLLIGKEIT – MONAT (1-12, leer=keine)'}),
-          h('div',{className:'row',style:{gap:8}}),
+        // Normal budget - only if NOT reserve
+        !f2.res&&h(Fragment,null,
+          h(Lbl,{t:'HAUSHALTS-BUDGET / MONAT'}),h('input',{type:'number',min:'0',step:'10',value:f2.sb||0,onInput:e=>sf2(p=>({...p,sb:+e.target.value})),className:'inp'}),
+          h(Lbl,{t:'PERSÖNLICHES BUDGET / MONAT'}),h('input',{type:'number',min:'0',step:'10',value:f2.pb||0,onInput:e=>sf2(p=>({...p,pb:+e.target.value})),className:'inp'})
+        ),
+        // Reserve fields - only if IS reserve
+        f2.res&&h('div',{style:{background:'var(--raised)',borderRadius:10,padding:14,border:'1px solid var(--blue)33'}},
+          h('div',{className:'toggle',style:{marginBottom:12}},
+            h('button',{className:!f2.ryearly?'on':'',onClick:e=>{e.stopPropagation();sf2(p=>({...p,ryearly:false}));}},'Monatlich'),
+            h('button',{className:f2.ryearly?'on':'',onClick:e=>{e.stopPropagation();sf2(p=>({...p,ryearly:true}));}},'Jährlich')
+          ),
+          !f2.ryearly&&h(Fragment,null,
+            h(Lbl,{t:'BETRAG PRO MONAT (CHF)'}),
+            h('input',{type:'number',min:'0',step:'5',value:f2.rsb||0,
+              onInput:e=>{const m=+e.target.value;sf2(p=>({...p,rsb:m,rpb:m,rybsb:Math.round(m*(p.rinterval||12))}));},
+              className:'inp'}),
+            h('div',{style:{fontSize:11,color:'var(--blue)',marginBottom:8}},'= '+fmtC((f2.rsb||0)*(f2.rinterval||12))+' pro Jahr')
+          ),
+          f2.ryearly&&h(Fragment,null,
+            h(Lbl,{t:'BETRAG PRO JAHR (CHF)'}),
+            h('input',{type:'number',min:'0',step:'10',value:f2.rybsb||0,
+              onInput:e=>{const y=+e.target.value;const m=Math.round(y/12*100)/100;sf2(p=>({...p,rybsb:y,rsb:m,rpb:m}));},
+              className:'inp'}),
+            h('div',{style:{fontSize:11,color:'var(--blue)',marginBottom:8}},'= '+fmtC(Math.round((f2.rybsb||0)/12*100)/100)+' pro Monat')
+          ),
+          h(Lbl,{t:'FÄLLIGKEITSMONAT'}),
           h('select',{value:f2.rdueMonth||'',onChange:e=>sf2(p=>({...p,rdueMonth:+e.target.value||null})),className:'inp',style:{marginBottom:8}},
             h('option',{value:''},'Kein fixes Datum'),
             [{v:1,l:'Januar'},{v:2,l:'Februar'},{v:3,l:'März'},{v:4,l:'April'},{v:5,l:'Mai'},{v:6,l:'Juni'},
@@ -1223,8 +1331,10 @@ function Sett({data,set,sess,drv,setD,sync,connect,disconnect,doUp,doDn}){
             ].map(m=>h('option',{key:m.v,value:m.v},m.l))
           ),
           f2.rdueMonth&&h(Fragment,null,
-            h(Lbl,{t:'ZAHLUNGSINTERVALL (MONATE)'}),
-            h('select',{value:f2.rinterval||1,onChange:e=>sf2(p=>({...p,rinterval:+e.target.value})),className:'inp',style:{marginBottom:0}},
+            h(Lbl,{t:'ZAHLUNGSINTERVALL'}),
+            h('select',{value:f2.rinterval||12,
+              onChange:e=>{const iv=+e.target.value;sf2(p=>({...p,rinterval:iv,rybsb:Math.round((p.rsb||0)*iv)}));},
+              className:'inp',style:{marginBottom:0}},
               h('option',{value:1},'Monatlich'),
               h('option',{value:2},'Alle 2 Monate'),
               h('option',{value:3},'Vierteljährlich (3 Mt.)'),
